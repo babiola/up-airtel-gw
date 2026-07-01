@@ -65,9 +65,8 @@ public class AirtelUssdGw {
                 String pushUserId = config.getProperty("ussd.push.http.userid");
                 String pushPassword = config.getProperty("ussd.push.http.password");
                 String pushServiceCode = config.getProperty("ussd.push.http.serviceCode");
-                String pushTypeValue = config.getProperty("ussd.push.http.typeValue", "1");
                 httpPush = new UssdPushHttp(pushIp, pushHttpPort, pushUserId, pushPassword,
-                        pushServiceCode, pushTypeValue);
+                        pushServiceCode);
                 log.info("Using HTTP push method");
             }
 

@@ -12,6 +12,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 
 public class UssdPushServer {
@@ -65,8 +66,10 @@ public class UssdPushServer {
 
             String msisdn = params.get("msisdn");
             String input = params.get("input");
-            String type = params.get("type");
-            if (type == null) type = "1";
+            String sessionId = params.get("sessionid");
+            if (sessionId == null || sessionId.isBlank()) {
+                sessionId = UUID.randomUUID().toString().replace("-", "");
+            }
 
             if (msisdn == null || input == null) {
                 respond(exchange, 400, "Missing msisdn or input");
@@ -75,10 +78,10 @@ public class UssdPushServer {
 
             input = URLDecoder.decode(input, StandardCharsets.UTF_8);
 
-            log.info("Push USSD | type={} msisdn={} input={}", type, msisdn, input);
+            log.info("Push USSD | msisdn={} input={} sessionid={}", msisdn, input, sessionId);
 
             if (httpPush != null) {
-                httpPush.push(type, msisdn, input);
+                httpPush.push(msisdn, sessionId, input);
             } else {
                 handler.sendPushInit(msisdn, input);
             }

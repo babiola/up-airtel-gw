@@ -3,100 +3,103 @@ package org.skurel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509ExtendedTrustManager;
+import java.net.Socket;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 
 public class UssdPushHttp {
     private static final Logger log = LoggerFactory.getLogger(UssdPushHttp.class);
-
-    private static final String URL_TYPE_1_PUSH = "http://<IP>:<PUSH_IA_PORT>/ussdhttpquery/qs?TYPE=<TYPE_VALUE>&PUSH_TYPE=1&SERVICE_CODE=<SERVICE_CODE_VALUE>&MSISDN=<MSISDN_VALUE>&PUSH_TEXT=<PUSH_TEXT_VALUE>&USER_ID=<USER_ID_VALUE>&PASSWORD=<PASSWORD_VALUE>";
-
-    private static final String URL_TYPE_2_QUERY = "http://<IP>:<PUSH_IA_PORT>/ussdhttpquery/qs?PUSH_TYPE=2&SERVICE_CODE=<SERVICE_CODE_VALUE>&MSISDN=<MSISDN_VALUE>&USER_ID=<USER_ID>&PASSWORD=<PASSWORD>";
-
-    private static final String URL_TYPE_3_NOTIFY = "http://<IP>:<PUSH_IA_PORT>/ussdhttpquery/qs?PUSH_TYPE=3&SERVICE_CODE=<SERVICE_CODE_VALUE>&MSISDN=<MSISDN_VALUE>&PUSH_TEXT=<PUSH_TEXT>&USER_ID=<USER_ID>&PASSWORD=<PASSWORD>";
 
     private final String ip;
     private final String port;
     private final String userId;
     private final String password;
     private final String serviceCode;
-    private final String typeValue;
     private final HttpClient httpClient;
 
     public UssdPushHttp(String ip, String port, String userId, String password,
-                        String serviceCode, String typeValue) {
+                        String serviceCode) {
         this.ip = ip;
         this.port = port;
         this.userId = userId;
         this.password = password;
         this.serviceCode = serviceCode;
-        this.typeValue = typeValue;
+        SSLParameters sslParams = new SSLParameters();
+        sslParams.setEndpointIdentificationAlgorithm(null);
+
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
+                .sslContext(trustAllCerts())
+                .sslParameters(sslParams)
                 .build();
     }
 
-    public boolean push(String type, String msisdn, String pushText) {
-        String template;
-        switch (type) {
-            case "1":
-                template = URL_TYPE_1_PUSH
-                    .replace("<TYPE_VALUE>", typeValue);
-                break;
-            case "2":
-                template = URL_TYPE_2_QUERY;
-                break;
-            case "3":
-                template = URL_TYPE_3_NOTIFY;
-                break;
-            default:
-                log.warn("Unknown push type: {}, defaulting to 1", type);
-                template = URL_TYPE_1_PUSH
-                    .replace("<TYPE_VALUE>", typeValue);
-                break;
-        }
+    public void push(String msisdn, String sessionId, String input) {
+        String pushUrl = "https://" + ip + ":" + port +
+                "/ussdhttpquery/qs?PUSH_TYPE=3" +
+                "&SERVICE_CODE=" + URLEncoder.encode(serviceCode, StandardCharsets.UTF_8) +
+                "&USER_ID=" + URLEncoder.encode(userId, StandardCharsets.UTF_8) +
+                "&PASSWORD=" + URLEncoder.encode(password, StandardCharsets.UTF_8) +
+                "&MSISDN=" + URLEncoder.encode(msisdn, StandardCharsets.UTF_8) +
+                "&PUSH_TEXT=" + URLEncoder.encode(input, StandardCharsets.UTF_8) +
+                "&OPT_PARAM=" +
+                "&SESSION_ID=" + URLEncoder.encode(sessionId, StandardCharsets.UTF_8);
 
-        String url = template
-                .replace("<IP>", ip)
-                .replace("<PUSH_IA_PORT>", port)
-                .replace("<SERVICE_CODE_VALUE>", serviceCode)
-                .replace("<MSISDN_VALUE>", msisdn)
-                .replace("<USER_ID_VALUE>", userId)
-                .replace("<USER_ID>", userId)
-                .replace("<PASSWORD_VALUE>", password)
-                .replace("<PASSWORD>", password);
+        log.info("event=airtel_push_http_start url={}", pushUrl);
 
-        if (pushText != null) {
-            String encoded = URLEncoder.encode(pushText, StandardCharsets.UTF_8);
-            url = url.replace("<PUSH_TEXT_VALUE>", encoded)
-                     .replace("<PUSH_TEXT>", encoded);
-        } else {
-            url = url.replace("<PUSH_TEXT_VALUE>", "")
-                     .replace("<PUSH_TEXT>", "");
-        }
+        httpGet(pushUrl).thenAccept(v -> {
+            log.info("event=airtel_push_http_complete url={}", pushUrl);
+        }).exceptionally(e -> {
+            log.error("event=airtel_push_http_failed url={} error={}", pushUrl, e.getMessage(), e);
+            return null;
+        });
+    }
 
+    private static SSLContext trustAllCerts() {
         try {
-            log.info("HTTP push | type={} msisdn={} url={}", type, msisdn, url);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(10))
-                    .POST(HttpRequest.BodyPublishers.noBody())
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            log.info("HTTP push response | type={} msisdn={} status={} body={}",
-                    type, msisdn, response.statusCode(), response.body());
-            return response.statusCode() >= 200 && response.statusCode() < 300;
-
+            SSLContext ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, new TrustManager[]{
+                    new X509ExtendedTrustManager() {
+                        public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                        public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                        public void checkClientTrusted(X509Certificate[] chain, String authType, Socket socket) {}
+                        public void checkServerTrusted(X509Certificate[] chain, String authType, Socket socket) {}
+                        public void checkClientTrusted(X509Certificate[] chain, String authType, SSLEngine engine) {}
+                        public void checkServerTrusted(X509Certificate[] chain, String authType, SSLEngine engine) {}
+                        public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+                    }
+            }, new SecureRandom());
+            return ctx;
         } catch (Exception e) {
-            log.error("HTTP push failed | type={} msisdn={}", type, msisdn, e);
-            return false;
+            throw new RuntimeException("Failed to create trust-all SSLContext", e);
         }
+    }
+
+    private CompletableFuture<Void> httpGet(String url) {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                .thenAccept(response -> {
+                    int status = response.statusCode();
+                    if (status < 200 || status >= 300) {
+                        log.warn("event=airtel_push_http_non_200 status={} url={}", status, url);
+                    }
+                });
     }
 }
