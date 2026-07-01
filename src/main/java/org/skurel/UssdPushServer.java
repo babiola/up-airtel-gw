@@ -20,12 +20,18 @@ public class UssdPushServer {
     private final int port;
     private final SmppConnectionPool connectionPool;
     private final UssdMessageHandler handler;
+    private final UssdPushHttp httpPush;
     private HttpServer server;
 
     public UssdPushServer(int port, SmppConnectionPool connectionPool, UssdMessageHandler handler) {
+        this(port, connectionPool, handler, null);
+    }
+
+    public UssdPushServer(int port, SmppConnectionPool connectionPool, UssdMessageHandler handler, UssdPushHttp httpPush) {
         this.port = port;
         this.connectionPool = connectionPool;
         this.handler = handler;
+        this.httpPush = httpPush;
     }
 
     public void start() throws IOException {
@@ -59,6 +65,8 @@ public class UssdPushServer {
 
             String msisdn = params.get("msisdn");
             String input = params.get("input");
+            String type = params.get("type");
+            if (type == null) type = "1";
 
             if (msisdn == null || input == null) {
                 respond(exchange, 400, "Missing msisdn or input");
@@ -67,9 +75,13 @@ public class UssdPushServer {
 
             input = URLDecoder.decode(input, StandardCharsets.UTF_8);
 
-            log.info("Push USSD | msisdn={} input={}", msisdn, input);
+            log.info("Push USSD | type={} msisdn={} input={}", type, msisdn, input);
 
-            handler.sendPushInit(msisdn, input);
+            if (httpPush != null) {
+                httpPush.push(type, msisdn, input);
+            } else {
+                handler.sendPushInit(msisdn, input);
+            }
             respond(exchange, 200, "OK");
 
         } catch (Exception e) {

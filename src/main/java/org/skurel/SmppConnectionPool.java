@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class SmppConnectionPool {
     private static final Logger log = LoggerFactory.getLogger(SmppConnectionPool.class);
-    private static final long TRANSACTION_TIMER = 2000L;
+    private static final long TRANSACTION_TIMER = 30000L;
     private static final int ENQUIRELINK_INTERVAL = 15000;
     private static final int PDU_PROCESSOR_DEGREE = 10;
 
@@ -114,7 +114,7 @@ public class SmppConnectionPool {
             reconnectThread.interrupt();
             SMPPSession session = activeSessionRef.getAndSet(null);
             if (session != null) {
-                try { session.unbindAndClose(); } catch (Exception ignored) {}
+                try { session.close(); } catch (Exception ignored) {}
             }
         }
 
@@ -152,7 +152,7 @@ public class SmppConnectionPool {
                     CountDownLatch closeLatch = new CountDownLatch(1);
                     session.addSessionStateListener((newState, oldState, source) -> {
                         if (newState == SessionState.CLOSED || newState == SessionState.UNBOUND) {
-                            log.warn("Session {}:{} dropped ({} → {}), will reconnect", host, port, oldState, newState);
+                            log.warn("Session {}:{} dropped ({} -> {}), will reconnect", host, port, oldState, newState);
                             closeLatch.countDown();
                         }
                     });
@@ -169,13 +169,15 @@ public class SmppConnectionPool {
                     Thread.currentThread().interrupt();
                     break;
                 } catch (IOException e) {
-                    log.error("Connection to {}:{} failed: {}. Reconnecting in {}s", host, port, e.getMessage(), backoffSeconds);
+                    Throwable cause = e.getCause();
+                    String reason = cause != null ? cause.getMessage() : e.getMessage();
+                    log.error("Bind to {}:{} failed: {}. Reconnecting in {}s", host, port, reason, backoffSeconds);
                 } catch (Exception e) {
                     log.error("Unexpected error on {}:{}. Reconnecting in {}s", host, port, e.getMessage(), backoffSeconds);
                 } finally {
                     activeSessionRef.set(null);
                     if (session != null) {
-                        try { session.unbindAndClose(); } catch (Exception ignored) {}
+                        try { session.close(); } catch (Exception ignored) {}
                     }
                 }
 

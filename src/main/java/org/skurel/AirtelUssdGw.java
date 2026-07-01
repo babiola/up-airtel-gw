@@ -28,7 +28,9 @@ public class AirtelUssdGw {
         String processUrl = config.getProperty("ussd.processUrl");
         String serviceCode = config.getProperty("ussd.serviceCode", "");
         String serviceType = config.getProperty("ussd.serviceType", "USSD");
+        boolean testMode = "true".equalsIgnoreCase(config.getProperty("ussd.testMode", "false"));
         int pushPort = Integer.parseInt(config.getProperty("ussd.push.port", String.valueOf(DEFAULT_PUSH_PORT)));
+        String pushMethod = config.getProperty("ussd.push.method", "smpp");
 
         if (isBlank(hostsProp) || isBlank(systemId) || isBlank(password) || isBlank(processUrl)) {
             log.error("Missing required config: smpp.hosts, smpp.systemId, smpp.password, ussd.processUrl");
@@ -45,29 +47,43 @@ public class AirtelUssdGw {
         log.info("SMPP systemId: {}", systemId);
         log.info("Service code: {}", serviceCode);
         log.info("Service type: {}", serviceType);
-        log.info("USSD process URL: {}", processUrl);
+        if (testMode) log.warn("TEST MODE enabled - will not call HTTP app");
         log.info("Push HTTP port: {}", pushPort);
         log.info("Worker threads: {}", workerThreads);
 
         try {
             SmppConnectionPool connectionPool = new SmppConnectionPool(hosts, port, systemId, password);
 
-            UssdMessageHandler messageHandler = new UssdMessageHandler(connectionPool, processUrl, serviceCode, serviceType, workerThreads);
+            UssdMessageHandler messageHandler = new UssdMessageHandler(connectionPool, processUrl, serviceCode, serviceType, workerThreads, testMode);
 
             connectionPool.start(messageHandler);
 
-            UssdPushServer pushServer = new UssdPushServer(pushPort, connectionPool, messageHandler);
+            UssdPushHttp httpPush = null;
+            if ("http".equalsIgnoreCase(pushMethod)) {
+                String pushIp = config.getProperty("ussd.push.http.ip");
+                String pushHttpPort = config.getProperty("ussd.push.http.port");
+                String pushUserId = config.getProperty("ussd.push.http.userid");
+                String pushPassword = config.getProperty("ussd.push.http.password");
+                String pushServiceCode = config.getProperty("ussd.push.http.serviceCode");
+                String pushTypeValue = config.getProperty("ussd.push.http.typeValue", "1");
+                httpPush = new UssdPushHttp(pushIp, pushHttpPort, pushUserId, pushPassword,
+                        pushServiceCode, pushTypeValue);
+                log.info("Using HTTP push method");
+            }
+
+            UssdPushServer pushServer = new UssdPushServer(pushPort, connectionPool, messageHandler, httpPush);
             pushServer.start();
+
+            Thread monitorThread = startTrafficMonitor(messageHandler, connectionPool);
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 log.info("Shutdown initiated...");
+                monitorThread.interrupt();
                 pushServer.shutdown();
                 messageHandler.shutdown();
                 connectionPool.shutdown();
                 log.info("Shutdown complete");
             }, "shutdown-hook"));
-
-            startTrafficMonitor(messageHandler, connectionPool);
 
             log.info("Gateway started. {} active connections.", connectionPool.activeConnectionCount());
             Thread.currentThread().join();
@@ -86,7 +102,7 @@ public class AirtelUssdGw {
         if (externalFile.exists()) {
             try (FileInputStream fis = new FileInputStream(externalFile)) {
                 props.load(fis);
-                log.info("Loaded config from {}", externalFile.getAbsolutePath());
+                //log.info("Loaded config from {}", externalFile.getAbsolutePath());
                 loaded = true;
             } catch (IOException e) {
                 log.warn("Failed to load external config: {}", e.getMessage());
@@ -97,7 +113,7 @@ public class AirtelUssdGw {
             try (InputStream is = AirtelUssdGw.class.getClassLoader().getResourceAsStream("config.properties")) {
                 if (is != null) {
                     props.load(is);
-                    log.info("Loaded config from classpath");
+                    //log.info("Loaded config from classpath");
                 } else {
                     log.warn("No config.properties found on classpath");
                 }
@@ -116,7 +132,7 @@ public class AirtelUssdGw {
         return props;
     }
 
-    private static void startTrafficMonitor(UssdMessageHandler handler, SmppConnectionPool pool) {
+    private static Thread startTrafficMonitor(UssdMessageHandler handler, SmppConnectionPool pool) {
         Thread monitor = new Thread(() -> {
             long lastDeliver = 0;
             long lastSubmit = 0;
@@ -128,6 +144,9 @@ public class AirtelUssdGw {
                     long totalSubmit = handler.getSubmitSmCount().get();
                     long httpErrors = handler.getHttpErrorCount().get();
                     long sendErrors = handler.getSendErrorCount().get();
+                    long negResp = handler.getNegRespCount().get();
+                    long timeouts = handler.getTimeoutCount().get();
+                    long ioErrs = handler.getIoErrCount().get();
 
                     long tpsDeliver = (totalDeliver - lastDeliver) / 5;
                     long tpsSubmit = (totalSubmit - lastSubmit) / 5;
@@ -136,8 +155,8 @@ public class AirtelUssdGw {
 
                     int activeConns = pool.activeConnectionCount();
 
-                    log.info("Traffic | deliver={}/s submit={}/s http_err={} send_err={} conns={}/{} | Total deliver={} submit={}",
-                            tpsDeliver, tpsSubmit, httpErrors, sendErrors, activeConns, 4,
+                    log.info("Traffic | deliver={}/s submit={}/s http_err={} send_err={} [negResp={} timeout={} ioErr={}] conns={}/{} | Total deliver={} submit={}",
+                            tpsDeliver, tpsSubmit, httpErrors, sendErrors, negResp, timeouts, ioErrs, activeConns, 4,
                             totalDeliver, totalSubmit);
 
                 } catch (InterruptedException e) {
@@ -148,6 +167,7 @@ public class AirtelUssdGw {
         }, "traffic-monitor");
         monitor.setDaemon(true);
         monitor.start();
+        return monitor;
     }
 
     private static boolean isBlank(String s) {
