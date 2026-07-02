@@ -140,8 +140,9 @@ public class UssdMessageHandler {
             log.info("[HTTP] >> {} to {}", url, msisdn);
 
             callHttpAsync(url, session, msisdn, sessionid, startNanos, menu -> {
-                if (menu == null || menu.isEmpty()) return;
-                sendSubmitSm(session, msisdn, menu, sessionid, startNanos);
+                //if (menu == null || menu.isEmpty()) menu = "END Please try again later";
+                String finalMenu = (menu == null || menu.isEmpty()) ? "END Please try again later" : menu;
+                sendSubmitSm(session, msisdn, finalMenu, sessionid, startNanos);
             });
 
         } catch (Exception e) {
@@ -301,12 +302,22 @@ public class UssdMessageHandler {
                         int status = response.statusCode();
                         if (status >= 200 && status < 300) {
                             String body = response.body().trim();
+                            if (body.startsWith("{")) {
+                                try {
+                                    org.json.JSONObject json = new org.json.JSONObject(body);
+                                    String key = json.has("message") ? "message"
+                                               : json.has("Message") ? "Message" : null;
+                                    if (key != null) {
+                                        body = json.getString(key);
+                                    }
+                                } catch (org.json.JSONException ignored) { }
+                            }
                             log.info("[TRACE] << MSISDN={} session={} | HTTP 200 in {}ms | body={}", msisdn, sessionid, elapsed, body);
                             callback.accept(body);
                         } else {
                             log.warn("HTTP {} from USSD app for MSISDN={} in {}ms", status, msisdn, elapsed);
                             httpErrorCount.incrementAndGet();
-                            sendSubmitSm(session, msisdn, "Please try again, the request timeout", sessionid, startNanos);
+                            sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos);
                         }
                     }, workerPool)
                     // Fix 2: Use exceptionallyAsync to protect your system threads
@@ -319,8 +330,8 @@ public class UssdMessageHandler {
 
                         // Fix 3: Handle both standard timeouts and Java HTTPClient internal timeouts
                         String errMsg = (cause instanceof java.net.http.HttpTimeoutException || cause instanceof java.util.concurrent.TimeoutException)
-                                ? "Please try again, the request timeout"
-                                : "Please try again, the response took longer";
+                                ? "END Please try again, the request timeout"
+                                : "END Please try again, the response took longer";
 
                         sendSubmitSm(session, msisdn, errMsg, sessionid, startNanos);
                         return null;
@@ -330,7 +341,7 @@ public class UssdMessageHandler {
             long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
             log.error("HTTP call failed for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
             httpErrorCount.incrementAndGet();
-            sendSubmitSm(session, msisdn, "Please try again, the request timeout", sessionid, startNanos);
+            sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos);
         }
     }
 
