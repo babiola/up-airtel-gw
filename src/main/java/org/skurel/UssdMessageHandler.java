@@ -26,6 +26,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import static java.lang.Thread.*;
 
 public class UssdMessageHandler {
@@ -322,7 +323,7 @@ public class UssdMessageHandler {
         }
         return connectionPool.nextHealthySession();
     }
-
+/*
     private void callHttpAsync(String url, SMPPSession session, String msisdn, String sessionid, long startNanos, Consumer<String> callback) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -388,7 +389,81 @@ public class UssdMessageHandler {
             httpErrorCount.incrementAndGet();
             executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
         }
+    }*/
+
+    private void callHttpAsync(String url, SMPPSession session, String msisdn, String sessionid, long startNanos, Consumer<String> callback) {
+        try {
+            // High-Traffic State Guard: Guarantees SMPP is fired EXACTLY once per session
+            final AtomicBoolean isTransactionFinalized = new AtomicBoolean(false);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(15))
+                    .GET()
+                    .build();
+
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            .orTimeout(15, TimeUnit.SECONDS)
+                    .thenAcceptAsync(response -> {
+                        // Guard Check: If a timeout or error already ran, abort immediately!
+                        if (!isTransactionFinalized.compareAndSet(false, true)) {
+                            log.warn("[LATE ARRIVAL] Dropping late HTTP success for MSISDN={} | Session already timed out.", msisdn);
+                            return;
+                        }
+
+                        long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+                        int status = response.statusCode();
+                        
+                        if (status >= 200 && status < 300) {
+                            String body = response.body().trim();
+                            if (body.startsWith("{")) {
+                                try {
+                                    org.json.JSONObject json = new org.json.JSONObject(body);
+                                    String key = json.has("message") ? "message"
+                                               : json.has("Message") ? "Message" : null;
+                                    if (key != null) {
+                                        body = json.getString(key);
+                                    }
+                                } catch (org.json.JSONException ignored) { }
+                            }
+                            log.info("[TRACE] << MSISDN={} session={} | HTTP 200 in {}ms | body={}", msisdn, sessionid, elapsed, body);
+                            callback.accept(body);
+                        } else {
+                            log.warn("HTTP {} from USSD app for MSISDN={} in {}ms", status, msisdn, elapsed);
+                            httpErrorCount.incrementAndGet();
+                            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
+                        }
+                    }, workerPool)
+                    
+                    .exceptionally(ex -> {
+                        // Guard Check: If the HTTP success path beat the timeout, abort the error tracking
+                        if (!isTransactionFinalized.compareAndSet(false, true)) {
+                            log.warn("[RACE CONDITION] Timeout triggered but HTTP response already won for MSISDN={}", msisdn);
+                            return null;
+                        }
+
+                        long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+
+                        log.error("HTTP call failed for MSISDN={} in {}ms: {}", msisdn, elapsed, cause.getMessage());
+                        httpErrorCount.incrementAndGet();
+
+                        String errMsg = (cause instanceof java.net.http.HttpTimeoutException || cause instanceof java.util.concurrent.TimeoutException)
+                                ? "END Please try again, the request timeout"
+                                : "END Please try again, the response took longer";
+
+                        executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, errMsg, sessionid, startNanos));
+                        return null;
+                    });
+
+        } catch (Exception e) {
+            long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+            log.error("HTTP pipeline failure for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
+            httpErrorCount.incrementAndGet();
+            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
+        }
     }
+
 
     /**
      * 4. Helper method to safeguard your thread pools from SMPP network latency.
