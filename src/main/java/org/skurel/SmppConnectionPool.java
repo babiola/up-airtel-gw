@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class SmppConnectionPool {
     private static final Logger log = LoggerFactory.getLogger(SmppConnectionPool.class);
-    private static final long TRANSACTION_TIMER = 30000L;
+    private static final long TRANSACTION_TIMER = 3000L;
     private static final int ENQUIRELINK_INTERVAL = 15000;
     private static final int PDU_PROCESSOR_DEGREE = 10;
 

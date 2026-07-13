@@ -24,6 +24,7 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 import static java.lang.Thread.*;
 
@@ -65,56 +66,71 @@ public class UssdMessageHandler {
         this.serviceType = serviceType;
         this.testMode = testMode;
 
-
-        
         // 1. HIGH TRAFFIC FIX: Use a bounded ThreadPoolExecutor instead of a naked FixedThreadPool.
         // If your backend crawls to a halt, this stops an infinite queue from eating all your RAM.
         int maxPoolSize = workerThreads * 2; // Allow some elasticity under heavy spike conditions
-        int queueCapacity = 10000;            // Keeps 5,000 tasks waiting before rejecting traffic
+        int queueCapacity = 5000;            // Keeps 5,000 tasks waiting before rejecting traffic
 
-//        this.workerPool = new ThreadPoolExecutor(
-//                workerThreads,                                // Core threads constantly kept alive
-//                maxPoolSize,                                  // Max threads allowed during a major traffic surge
-//                60L, TimeUnit.SECONDS,                        // Idle time before killing excess threads
-//                new ArrayBlockingQueue<>(queueCapacity),      // Bounded queue to enforce backpressure limits
-//                r -> {
-//                    Thread t = new Thread(r, "ussd-worker");
-//                    t.setDaemon(true);
-//                    return t;
-//                },
-//                // Throws a RejectedExecutionException if the 5000-slot queue fills up completely
-//                new ThreadPoolExecutor.AbortPolicy()
-//        );
-//
-//        this.deliverPool = Executors.newFixedThreadPool(100, r -> {
-//            Thread t = new Thread(r, "deliver-intake");
-//            t.setDaemon(true);
-//            return t;
-//        });
-//
-//        this.smppPool = new ThreadPoolExecutor(
-//                1000, 2000,
-//                60L, TimeUnit.SECONDS,
-//                new ArrayBlockingQueue<>(10000),
-//                r -> {
-//                    Thread t = new Thread(r, "smpp-out");
-//                    t.setDaemon(true);
-//                    return t;
-//                },
-//                new ThreadPoolExecutor.CallerRunsPolicy()
-//        );
+        this.workerPool = new ThreadPoolExecutor(
+                workerThreads,                                // Core threads constantly kept alive
+                maxPoolSize,                                  // Max threads allowed during a major traffic surge
+                60L, TimeUnit.SECONDS,                        // Idle time before killing excess threads
+                new ArrayBlockingQueue<>(queueCapacity),      // Bounded queue to enforce backpressure limits
+                r -> {
+                    Thread t = new Thread(r, "ussd-worker");
+                    t.setDaemon(true);
+                    return t;
+                },
+                // Throws a RejectedExecutionException if the 5000-slot queue fills up completely
+                new ThreadPoolExecutor.AbortPolicy()
+        );
 
-        this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
-        this.deliverPool = Executors.newVirtualThreadPerTaskExecutor();
-        this.smppPool = Executors.newVirtualThreadPerTaskExecutor();
+        this.deliverPool = Executors.newFixedThreadPool(50, r -> {
+            Thread t = new Thread(r, "deliver-intake");
+            t.setDaemon(true);
+            return t;
+        });
+
+        this.smppPool = new ThreadPoolExecutor(
+                200, 400,
+                60L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(2000),
+                r -> {
+                    Thread t = new Thread(r, "smpp-out");
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
 
         // 2. HIGH TRAFFIC FIX: Omit the .executor() block completely on the HttpClient.
         // This allows Java to manage low-level socket polling using its internal, non-blocking fiber loops.
-       this.httpClient = HttpClient.newBuilder()
+        this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(3))
-                .version(HttpClient.Version.HTTP_1_1)
+                .version(HttpClient.Version.HTTP_1_1) // Preferred for stable, high-throughput telecom APIs
                 .build();
     }
+//    public UssdMessageHandlerx(SmppConnectionPool connectionPool, String processUrl,
+//                              String serviceCode, String serviceType, int workerThreads, boolean testMode) {
+//        this.connectionPool = connectionPool;
+//        this.processUrl = processUrl;
+//        this.serviceCode = serviceCode;
+//        this.serviceType = serviceType;
+//        this.testMode = testMode;
+//        this.workerPool = Executors.newFixedThreadPool(workerThreads, r -> {
+//            Thread t = new Thread(r, "ussd-worker");
+//            t.setDaemon(true);
+//            return t;
+//        });
+//        this.httpClient = HttpClient.newBuilder()
+//                .connectTimeout(Duration.ofSeconds(3))
+//                .executor(Executors.newFixedThreadPool(workerThreads, r -> {
+//                    Thread t = new Thread(r, "http-worker");
+//                    t.setDaemon(true);
+//                    return t;
+//                }))
+//                .build();
+//    }
 
     public void processDeliverSm(SMPPSession session, DeliverSm deliverSm) {
         if (MessageType.SMSC_DEL_RECEIPT.containedIn(deliverSm.getEsmClass())) {
@@ -122,12 +138,7 @@ public class UssdMessageHandler {
         }
 
         deliverSmCount.incrementAndGet();
-         try {
-            deliverPool.execute(() -> doProcess(session, deliverSm));
-        } catch (RejectedExecutionException e) {
-            log.error("deliverPool saturated - dropping deliver_sm, investigate immediately");
-        }
-        //deliverPool.execute(() -> doProcess(session, deliverSm));
+        deliverPool.execute(() -> doProcess(session, deliverSm));
     }
 
     private void doProcess(SMPPSession session, DeliverSm deliverSm) {
@@ -180,16 +191,12 @@ public class UssdMessageHandler {
                     + "&input=" + URLEncoder.encode(input, StandardCharsets.UTF_8)
                     + "&network=airtel&ussdPort=8210";
             log.info("[HTTP] >> {} to {}", url, msisdn);
-            try {
-                workerPool.execute(() -> callHttpSync(url, session, msisdn, sessionid, startNanos));
-            } catch (RejectedExecutionException e) {
-                // workerPool is full - don't let the session die silently.
-                // Respond immediately so the subscriber sees something
-                // sane instead of a hung menu.
-                log.error("workerPool saturated - sending busy fallback for MSISDN={}", msisdn);
-                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END System busy, please try again shortly", sessionid, startNanos));
-            }
-            //workerPool.execute(() -> callHttpSync(url, session, msisdn, sessionid, startNanos));
+
+            callHttpAsync(url, session, msisdn, sessionid, startNanos, menu -> {
+                //if (menu == null || menu.isEmpty()) menu = "END Please try again later";
+                String finalMenu = (menu == null || menu.isEmpty()) ? "END Please try again later" : menu;
+                sendSubmitSm(session, msisdn, finalMenu, sessionid, startNanos);
+            });
 
         } catch (Exception e) {
             log.error("Error processing deliver_sm: {}", e.getMessage());
@@ -276,7 +283,10 @@ public class UssdMessageHandler {
             byte[] payload = response.getBytes(StandardCharsets.ISO_8859_1);
             OptionalParameter.OctetString messagePayloadParam = new OptionalParameter.OctetString((short) 0x0424, payload);
 
-           
+            //if (payload.length > 254) {
+            //    log.warn("Payload too long: {} bytes. Truncating.", payload.length);
+            //    payload = Arrays.copyOf(payload, 254);
+           // }
 
             SMPPSession sendSession = resolveSendSession(preferredSession);
             if (sendSession == null) {
@@ -333,56 +343,148 @@ public class UssdMessageHandler {
         return connectionPool.nextHealthySession();
     }
 
-    private void callHttpSync(String url, SMPPSession session, String msisdn, String sessionid, long startNanos) {
+    private void callHttpAsync(String url, SMPPSession session, String msisdn, String sessionid, long startNanos, Consumer<String> callback) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(Duration.ofSeconds(15))
                     .GET()
                     .build();
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
-            int status = response.statusCode();
+            // 1. Leave the initial trigger completely non-blocking.
+            // Java's default HttpClient internal fiber selectors handle the network wait.
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                    .orTimeout(15, TimeUnit.SECONDS)
+                    .thenAcceptAsync(response -> {
+                        long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+                        int status = response.statusCode();
 
-            if (status >= 200 && status < 300) {
-                String body = response.body().trim();
-                if (body.startsWith("{")) {
-                    try {
-                        org.json.JSONObject json = new org.json.JSONObject(body);
-                        String key = json.has("message") ? "message"
-                                : json.has("Message") ? "Message" : null;
-                        if (key != null) body = json.getString(key);
-                    } catch (org.json.JSONException ignored) { }
-                }
-                log.info("[TRACE] << MSISDN={} session={} | HTTP 200 in {}ms | body={}", msisdn, sessionid, elapsed, body);
-                String finalMenu = (body == null || body.isEmpty()) ? "END Please try again later" : body;
-                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, finalMenu, sessionid, startNanos));
-            } else {
-                log.warn("HTTP {} from USSD app for MSISDN={} in {}ms", status, msisdn, elapsed);
-                httpErrorCount.incrementAndGet();
-                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
-            }
-        } catch (java.net.http.HttpTimeoutException  e) {
+                        if (status >= 200 && status < 300) {
+                            String body = response.body().trim();
+                            if (body.startsWith("{")) {
+                                try {
+                                    org.json.JSONObject json = new org.json.JSONObject(body);
+                                    String key = json.has("message") ? "message"
+                                            : json.has("Message") ? "Message" : null;
+                                    if (key != null) {
+                                        body = json.getString(key);
+                                    }
+                                } catch (org.json.JSONException ignored) { }
+                            }
+                            log.info("[TRACE] << MSISDN={} session={} | HTTP 200 in {}ms | body={}", msisdn, sessionid, elapsed, body);
+
+                            // High Traffic Warning: Ensure callback.accept doesn't block this worker thread.
+                            callback.accept(body);
+                        } else {
+                            log.warn("HTTP {} from USSD app for MSISDN={} in {}ms", status, msisdn, elapsed);
+                            httpErrorCount.incrementAndGet();
+
+                            // Execute off-thread downstream
+                            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
+                        }
+                    }, workerPool)
+
+                    // 2. High-Traffic Error Interceptor: Do NOT context-switch to workerPool here.
+                    // If a timeout hits under load, your workerPool is likely full. Running on the
+                    // timeout engine thread prevents queue allocation failure and system lockup.
+                    .exceptionally(ex -> {
+                        long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+
+                        log.error("HTTP call failed for MSISDN={} in {}ms: {}", msisdn, elapsed, cause.getMessage());
+                        httpErrorCount.incrementAndGet();
+
+                        String errMsg = (cause instanceof java.net.http.HttpTimeoutException || cause instanceof java.util.concurrent.TimeoutException)
+                                ? "END Please try again, the request timeout"
+                                : "END Please try again, the response took longer";
+
+                        // 3. Decouple the blocking network call out of the reactive chain immediately
+                        executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, errMsg, sessionid, startNanos));
+                        return null;
+                    });
+
+        } catch (Exception e) {
             long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
-            log.error("HTTP timeout for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
+            log.error("HTTP pipeline failure for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
             httpErrorCount.incrementAndGet();
             executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
-        } catch (Exception e) {
-            long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
-            log.error("HTTP call failed for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
-            httpErrorCount.incrementAndGet();
-            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the response took longer", sessionid, startNanos));
         }
     }
 
+    /**
+     * 4. Helper method to safeguard your thread pools from SMPP network latency.
+     * If sendSubmitSm performs blocking socket operations, run it inside a decoupled
+     * virtual thread worker or a separate bounded SMPP-outbound execution pool.
+     */
     private void executeAsyncSmpp(Runnable task) {
         try {
+            // Option A (Java 21+ Virtual Threads): Absolute best for high traffic / blocking network calls
+            //Thread.startVirtualThread(task);
+
+            // Option B (If on Java 11/17): Use a dedicated small, bounded pool JUST for outbound SMPP retries
             smppPool.submit(task);
         } catch (Exception e) {
-            log.error("Failed to queue SMPP outbound: {}", e.getMessage());
+            log.error("Failed to queue fallback SMPP alert message: {}", e.getMessage());
         }
     }
+//    private void callHttpAsyncx(String url, SMPPSession session, String msisdn, String sessionid, long startNanos, Consumer<String> callback) {
+//        try {
+//            // Fix 1: Hard timeout at the HTTP Request layer to safely close sockets
+//            HttpRequest request = HttpRequest.newBuilder()
+//                    .uri(URI.create(url))
+//                    .timeout(Duration.ofSeconds(10))
+//                    .GET()
+//                    .build();
+//
+//            httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+//                    .orTimeout(15, TimeUnit.SECONDS)
+//                    .thenAcceptAsync(response -> {
+//                        long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+//                        int status = response.statusCode();
+//                        if (status >= 200 && status < 300) {
+//                            String body = response.body().trim();
+//                            if (body.startsWith("{")) {
+//                                try {
+//                                    org.json.JSONObject json = new org.json.JSONObject(body);
+//                                    String key = json.has("message") ? "message"
+//                                               : json.has("Message") ? "Message" : null;
+//                                    if (key != null) {
+//                                        body = json.getString(key);
+//                                    }
+//                                } catch (org.json.JSONException ignored) { }
+//                            }
+//                            log.info("[TRACE] << MSISDN={} session={} | HTTP 200 in {}ms | body={}", msisdn, sessionid, elapsed, body);
+//                            callback.accept(body);
+//                        } else {
+//                            log.warn("HTTP {} from USSD app for MSISDN={} in {}ms", status, msisdn, elapsed);
+//                            httpErrorCount.incrementAndGet();
+//                            sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos);
+//                        }
+//                    }, workerPool)
+//                    // Fix 2: Use exceptionallyAsync to protect your system threads
+//                    .exceptionallyAsync(ex -> {
+//                        long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+//                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+//
+//                        log.error("HTTP call failed for MSISDN={} in {}ms: {}", msisdn, elapsed, cause.getMessage());
+//                        httpErrorCount.incrementAndGet();
+//
+//                        // Fix 3: Handle both standard timeouts and Java HTTPClient internal timeouts
+//                        String errMsg = (cause instanceof java.net.http.HttpTimeoutException || cause instanceof java.util.concurrent.TimeoutException)
+//                                ? "END Please try again, the request timeout"
+//                                : "END Please try again, the response took longer";
+//
+//                        sendSubmitSm(session, msisdn, errMsg, sessionid, startNanos);
+//                        return null;
+//                    }, workerPool); // Pass your pool here
+//
+//        } catch (Exception e) {
+//            long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
+//            log.error("HTTP call failed for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
+//            httpErrorCount.incrementAndGet();
+//            sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos);
+//        }
+//    }
 
 
     String prepairdResponse(String msisdn, String sessionid, String msg, String freeflow) {
