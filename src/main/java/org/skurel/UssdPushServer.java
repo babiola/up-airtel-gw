@@ -81,6 +81,7 @@ public class UssdPushServer {
             log.info("Push USSD | msisdn={} input={} sessionid={}", msisdn, input, sessionId);
 
             if (httpPush != null) {
+            	SessionManager.save(msisdn, sessionId);
                 httpPush.push(msisdn, sessionId, input);
             } else {
                 handler.sendPushInit(msisdn, input);

@@ -64,46 +64,6 @@ public class UssdMessageHandler {
         this.serviceCode = serviceCode;
         this.serviceType = serviceType;
         this.testMode = testMode;
-
-
-        
-        // 1. HIGH TRAFFIC FIX: Use a bounded ThreadPoolExecutor instead of a naked FixedThreadPool.
-        // If your backend crawls to a halt, this stops an infinite queue from eating all your RAM.
-        int maxPoolSize = workerThreads * 2; // Allow some elasticity under heavy spike conditions
-        int queueCapacity = 10000;            // Keeps 5,000 tasks waiting before rejecting traffic
-
-//        this.workerPool = new ThreadPoolExecutor(
-//                workerThreads,                                // Core threads constantly kept alive
-//                maxPoolSize,                                  // Max threads allowed during a major traffic surge
-//                60L, TimeUnit.SECONDS,                        // Idle time before killing excess threads
-//                new ArrayBlockingQueue<>(queueCapacity),      // Bounded queue to enforce backpressure limits
-//                r -> {
-//                    Thread t = new Thread(r, "ussd-worker");
-//                    t.setDaemon(true);
-//                    return t;
-//                },
-//                // Throws a RejectedExecutionException if the 5000-slot queue fills up completely
-//                new ThreadPoolExecutor.AbortPolicy()
-//        );
-//
-//        this.deliverPool = Executors.newFixedThreadPool(100, r -> {
-//            Thread t = new Thread(r, "deliver-intake");
-//            t.setDaemon(true);
-//            return t;
-//        });
-//
-//        this.smppPool = new ThreadPoolExecutor(
-//                1000, 2000,
-//                60L, TimeUnit.SECONDS,
-//                new ArrayBlockingQueue<>(10000),
-//                r -> {
-//                    Thread t = new Thread(r, "smpp-out");
-//                    t.setDaemon(true);
-//                    return t;
-//                },
-//                new ThreadPoolExecutor.CallerRunsPolicy()
-//        );
-
         this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
         this.deliverPool = Executors.newVirtualThreadPerTaskExecutor();
         this.smppPool = Executors.newVirtualThreadPerTaskExecutor();
@@ -164,8 +124,13 @@ public class UssdMessageHandler {
             String input = decodeBase64(bufferValue(BUFFER_INPUT, payload));
 
             log.info("DELIVER_SM_IN:: MSISDN: {} | INPUT: {} | SESSION: {} | NEWREQUEST: {} | SERVICE_CODE: {} | TIME: {} | NETWORK: {}", msisdn, input, sessionid, isNewRequest, serviceCode, System.currentTimeMillis(), "airtel");
-
-            input = isNewRequest.equals("1") ? "*" + input + "#" : input;
+            String savedSessionId = SessionManager.retrieve(msisdn);
+            String _sessionId = sessionid;
+            if(savedSessionId == null) {
+            	_sessionId =  savedSessionId;
+            }else {
+            	 input = isNewRequest.equals("1") ? "*" + input + "#" : input;
+            }
 
             long startNanos = System.nanoTime();
             //log.info("[TRACE] >> MSISDN={} session={} input={} | processing", msisdn, sessionid, input);
@@ -176,7 +141,7 @@ public class UssdMessageHandler {
 
             String url = processUrl
                     + "?msisdn=" + msisdn
-                    + "&sessionid=" + sessionid
+                    + "&sessionid=" + _sessionId
                     + "&input=" + URLEncoder.encode(input, StandardCharsets.UTF_8)
                     + "&network=airtel&ussdPort=8210";
             log.info("[HTTP] >> {} to {}", url, msisdn);
