@@ -1,5 +1,21 @@
 target/
 log/
+
+### Spring Tool Suite / Eclipse ###
+.metadata/
+.classpath
+.project
+.settings/
+.springBeans
+.factorypath
+*.launch
+*.beaninfo
+
+### STS Dashboard & Boot Tools ###
+bin/
+/bin/
+.sts4-cache/
+
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
