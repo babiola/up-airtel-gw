@@ -1,33 +1,33 @@
 package org.skurel;
 
-import java.util.concurrent.ConcurrentHashMap;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import java.util.concurrent.TimeUnit;
 
 public class SessionManager {
-    // Thread-safe map: Key = MSISDN (String), Value = SessionID (String)
-    private static final ConcurrentHashMap<String, String> sessionMap = new ConcurrentHashMap<>();
+    
+    // Automatically removes sessions 5 minutes after they are created/updated
+    private static final Cache<String, String> sessionCache = Caffeine.newBuilder()
+            .expireAfterWrite(2, TimeUnit.MINUTES) 
+            .maximumSize(100_000) // Safety ceiling to prevent OOM under heavy load
+            .build();
 
-    // 1. Store or update a pair
-    public static void saveSession(String msisdn, String sessionId) {
-        sessionMap.put(msisdn, sessionId);
-    }
     public static void save(String msisdn, String sessionId) {
         if (msisdn != null && sessionId != null) {
-        	sessionMap.put(msisdn, sessionId);
+            sessionCache.put(msisdn, sessionId);
         }
     }
+
     public static String retrieve(String msisdn) {
         if (msisdn == null) {
             return null;
         }
-        return sessionMap.get(msisdn);
-    }
-    // 2. Retrieve a SessionID using MSISDN
-    public String getSession(String msisdn) {
-        return sessionMap.get(msisdn);
+        return sessionCache.getIfPresent(msisdn);
     }
 
-    // 3. Remove a pair when a session expires
-    public void removeSession(String msisdn) {
-        sessionMap.remove(msisdn);
+    public static void remove(String msisdn) {
+        if (msisdn != null) {
+            sessionCache.invalidate(msisdn);
+        }
     }
 }

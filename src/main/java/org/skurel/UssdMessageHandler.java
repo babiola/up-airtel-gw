@@ -124,9 +124,9 @@ public class UssdMessageHandler {
             String input = decodeBase64(bufferValue(BUFFER_INPUT, payload));
 
             log.info("DELIVER_SM_IN:: MSISDN: {} | INPUT: {} | SESSION: {} | NEWREQUEST: {} | SERVICE_CODE: {} | TIME: {} | NETWORK: {}", msisdn, input, sessionid, isNewRequest, serviceCode, System.currentTimeMillis(), "airtel");
-            String savedSessionId = SessionManager.retrieve(msisdn);
             String _sessionId = sessionid;
-            if(savedSessionId == null) {
+            String savedSessionId = SessionManager.retrieve(msisdn);
+            if(savedSessionId != null) {
             	_sessionId =  savedSessionId;
             }else {
             	 input = isNewRequest.equals("1") ? "*" + input + "#" : input;
@@ -302,7 +302,7 @@ public class UssdMessageHandler {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(Duration.ofSeconds(8))
                     .GET()
                     .build();
 
