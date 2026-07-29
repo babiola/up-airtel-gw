@@ -337,7 +337,7 @@ public class UssdMessageHandler {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(Duration.ofSeconds(8))
                     .GET()
                     .build();
 
