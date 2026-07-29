@@ -41,7 +41,7 @@ public class UssdPushHttp {
         sslParams.setEndpointIdentificationAlgorithm(null);
 
         this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(5))
+                .connectTimeout(Duration.ofSeconds(3))
                 .sslContext(trustAllCerts())
                 .sslParameters(sslParams)
                 .build();
@@ -91,7 +91,7 @@ public class UssdPushHttp {
     private CompletableFuture<Void> httpGet(String url) {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(10))
+                .timeout(Duration.ofSeconds(8))
                 .GET()
                 .build();
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
