@@ -30,6 +30,7 @@ public class AirtelUssdGw {
         String serviceType = config.getProperty("ussd.serviceType", "USSD");
         boolean testMode = "true".equalsIgnoreCase(config.getProperty("ussd.testMode", "false"));
         int pushPort = Integer.parseInt(config.getProperty("ussd.push.port", String.valueOf(DEFAULT_PUSH_PORT)));
+        int httpTimeoutSeconds = Integer.parseInt(config.getProperty("ussd.httpTimeoutSeconds", "8"));
         String pushMethod = config.getProperty("ussd.push.method", "smpp");
 
         if (isBlank(hostsProp) || isBlank(systemId) || isBlank(password) || isBlank(processUrl)) {
@@ -54,7 +55,7 @@ public class AirtelUssdGw {
         try {
             SmppConnectionPool connectionPool = new SmppConnectionPool(hosts, port, systemId, password);
 
-            UssdMessageHandler messageHandler = new UssdMessageHandler(connectionPool, processUrl, serviceCode, serviceType, workerThreads, testMode);
+            UssdMessageHandler messageHandler = new UssdMessageHandler(connectionPool, processUrl, serviceCode, serviceType, workerThreads, testMode, httpTimeoutSeconds);
 
             connectionPool.start(messageHandler);
 

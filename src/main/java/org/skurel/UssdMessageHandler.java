@@ -44,6 +44,7 @@ public class UssdMessageHandler {
     private final String serviceCode;
     private final String serviceType;
     private final boolean testMode;
+    private final int httpTimeoutSeconds;
     private final ExecutorService workerPool;
     private final ExecutorService deliverPool;
     private final ExecutorService smppPool;
@@ -58,12 +59,13 @@ public class UssdMessageHandler {
     private final AtomicLong ioErrCount = new AtomicLong();
 
     public UssdMessageHandler(SmppConnectionPool connectionPool, String processUrl,
-                              String serviceCode, String serviceType, int workerThreads, boolean testMode) {
+                              String serviceCode, String serviceType, int workerThreads, boolean testMode, int httpTimeoutSeconds) {
         this.connectionPool = connectionPool;
         this.processUrl = processUrl;
         this.serviceCode = serviceCode;
         this.serviceType = serviceType;
         this.testMode = testMode;
+        this.httpTimeoutSeconds = httpTimeoutSeconds;
         this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
         this.deliverPool = Executors.newVirtualThreadPerTaskExecutor();
         this.smppPool = Executors.newVirtualThreadPerTaskExecutor();
@@ -302,7 +304,7 @@ public class UssdMessageHandler {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(8))
+                    .timeout(Duration.ofSeconds(httpTimeoutSeconds))
                     .GET()
                     .build();
 
