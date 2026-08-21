@@ -137,7 +137,7 @@ public class UssdMessageHandler {
             long startNanos = System.nanoTime();
             //log.info("[TRACE] >> MSISDN={} session={} input={} | processing", msisdn, sessionid, input);
             if (testMode) {
-                sendSubmitSm(session, msisdn, "END Welcome to USSD, This is test mode", sessionid, startNanos);
+                sendSubmitSm(session, msisdn, "END Welcome to USSD, This is test mode", sessionid, startNanos, isNewRequest);
                 return;
             }
 
@@ -148,13 +148,13 @@ public class UssdMessageHandler {
                     + "&network=airtel&ussdPort=8210";
             log.info("[HTTP] >> {} to {}", url, msisdn);
             try {
-                workerPool.execute(() -> callHttpSync(url, session, msisdn, sessionid, startNanos));
+workerPool.execute(() -> callHttpSync(url, session, msisdn, sessionid, startNanos, isNewRequest));
             } catch (RejectedExecutionException e) {
                 // workerPool is full - don't let the session die silently.
                 // Respond immediately so the subscriber sees something
                 // sane instead of a hung menu.
                 log.error("workerPool saturated - sending busy fallback for MSISDN={}", msisdn);
-                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END System busy, please try again shortly", sessionid, startNanos));
+                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END System busy, please try again shortly", sessionid, startNanos, isNewRequest));
             }
             //workerPool.execute(() -> callHttpSync(url, session, msisdn, sessionid, startNanos));
 
@@ -217,7 +217,7 @@ public class UssdMessageHandler {
         }
     }
 
-    private void sendSubmitSm(SMPPSession preferredSession, String destination, String msg, String sessionid, long startNanos) {
+    private void sendSubmitSm(SMPPSession preferredSession, String destination, String msg, String sessionid, long startNanos, String isNewRequest) {
         String freeflow = "FC";
         final RegisteredDelivery registeredDelivery = new RegisteredDelivery();
         registeredDelivery.setSMSCDeliveryReceipt(SMSCDeliveryReceipt.SUCCESS_FAILURE);
@@ -271,8 +271,8 @@ public class UssdMessageHandler {
 
             long totalElapsed = (System.nanoTime() - startNanos) / 1_000_000;
             long endTime = System.currentTimeMillis();
-            log.info("USSD_SESSION:: SESSION_ID={} | PHONE_NUMBER={} | START_TIME={} | TOTAL_TIME={}ms | END_TIME={} | SHORT_CODE={} | NETWORK=AIRTEL",
-                    sessionid, destination, (endTime - totalElapsed), totalElapsed, endTime, serviceCode);
+            log.info("USSD_SESSION:: SESSION_ID={} | PHONE_NUMBER={} | START_TIME={} | TOTAL_TIME={}ms | END_TIME={} | SHORT_CODE={} | NETWORK=AIRTEL | NEWREQUEST={}",
+                    sessionid, destination, (endTime - totalElapsed), totalElapsed, endTime, serviceCode, isNewRequest);
 
         } catch (PDUException | ResponseTimeoutException | InvalidResponseException
                  | NegativeResponseException | IOException e) {
@@ -300,7 +300,7 @@ public class UssdMessageHandler {
         return connectionPool.nextHealthySession();
     }
 
-    private void callHttpSync(String url, SMPPSession session, String msisdn, String sessionid, long startNanos) {
+    private void callHttpSync(String url, SMPPSession session, String msisdn, String sessionid, long startNanos, String isNewRequest) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -324,22 +324,22 @@ public class UssdMessageHandler {
                 }
                 log.info("[TRACE] << MSISDN={} session={} | HTTP 200 in {}ms | body={}", msisdn, sessionid, elapsed, body);
                 String finalMenu = (body == null || body.isEmpty()) ? "END Please try again later" : body;
-                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, finalMenu, sessionid, startNanos));
+                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, finalMenu, sessionid, startNanos, isNewRequest));
             } else {
                 log.warn("HTTP {} from USSD app for MSISDN={} in {}ms", status, msisdn, elapsed);
                 httpErrorCount.incrementAndGet();
-                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
+                executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos, isNewRequest));
             }
         } catch (java.net.http.HttpTimeoutException  e) {
             long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
             log.error("HTTP timeout for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
             httpErrorCount.incrementAndGet();
-            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos));
+            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the request timeout", sessionid, startNanos, isNewRequest));
         } catch (Exception e) {
             long elapsed = (System.nanoTime() - startNanos) / 1_000_000;
             log.error("HTTP call failed for MSISDN={} in {}ms: {}", msisdn, elapsed, e.getMessage());
             httpErrorCount.incrementAndGet();
-            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the response took longer", sessionid, startNanos));
+            executeAsyncSmpp(() -> sendSubmitSm(session, msisdn, "END Please try again, the response took longer", sessionid, startNanos, isNewRequest));
         }
     }
 
